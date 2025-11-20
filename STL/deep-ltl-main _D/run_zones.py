@@ -19,21 +19,24 @@ class Args:
     log_wandb: bool = False
     save: bool = True
 
-    # >>> 新增：训练期奖励形塑开关与系数 <<<
+    # >>> 训练期奖励形塑开关与系数 <<<
     shaping_enable: bool = False   # 对应 train_ppo 的 --shaping.enable
     shaping_beta: float = 1.0      # 对应 --shaping.beta
     shaping_eta: float = 0.0       # 对应 --shaping.eta
+    shaping_alpha: float = 0.5     # 对应 --shaping.alpha
 
-    # >>> 新增：alpha（目标匹配距离的权重） <<<
-    shaping_alpha: float = 0.5
+    # >>> Phase-1：信念推进参数（透传到 train_ppo） <<<
+    belief_enable: bool = False
+    belief_ema_tau: float = 0.9
+    belief_temperature: float = 1.0
+    belief_reward_coef_delta: float = 0.0
+    belief_expose_accept_prob: bool = False
 
-     # --- ADD: HER 相关 ---
-    her_enable: bool = False
-    her_k_future: int = 4
-    her_aux_epochs: int = 1
-    her_aux_batch: int = 1024
-    her_lambda_bc: float = 0.0
-    # --- END ADD ---
+    # >>> 命题噪声参数（透传到 train_ppo） <<<
+    noise_enable: bool = False
+    noise_p_miss: float = 0.0
+    noise_p_false: float = 0.0
+    noise_delay_steps: int = 0
 
 
 def main():
@@ -54,7 +57,6 @@ def main():
             '--save_interval', '2',
             '--epochs', '10',
             '--num_steps', '15_000_000',
-            # '--num_steps', '1500',
             '--model_config', 'PointLtl2-v0',
             '--curriculum', 'PointLtl2-v0',
             '--name', args.name,
@@ -62,24 +64,36 @@ def main():
             '--device', args.device,
             '--num_procs', str(args.num_procs),
         ]
-        # >>> 仅当启用时，透传到 train_ppo.py（注意：train_ppo 用“点号”风格） <<<
+
+        # 形塑参数（仅启用时透传）
         if args.shaping_enable:
             command += [
                 '--shaping.enable',
                 '--shaping.beta', str(args.shaping_beta),
                 '--shaping.eta',  str(args.shaping_eta),
-                '--shaping.alpha', str(args.shaping_alpha),  # <<< 新增透传
+                '--shaping.alpha', str(args.shaping_alpha),
             ]
-         # --- ADD: HER 透传 ---
-        if args.her_enable:
+
+        # Phase-1：信念推进（仅启用时透传）
+        if args.belief_enable:
             command += [
-                '--her.enable',
-                '--her.k_future', str(args.her_k_future),
-                '--her.aux_epochs', str(args.her_aux_epochs),
-                '--her.aux_batch', str(args.her_aux_batch),
-                '--her.lambda_bc', str(args.her_lambda_bc),
+                '--belief.enable',
+                '--belief.ema_tau', str(args.belief_ema_tau),
+                '--belief.temperature', str(args.belief_temperature),
+                '--belief.reward_coef_delta', str(args.belief_reward_coef_delta),
             ]
-        # --- END ADD ---
+            if args.belief_expose_accept_prob:
+                command += ['--belief.expose_accept_prob']
+
+        # 命题噪声（仅启用时透传）
+        if args.noise_enable:
+            command += [
+                '--noise_enable',
+                '--noise_p_miss', str(args.noise_p_miss),
+                '--noise_p_false', str(args.noise_p_false),
+                '--noise_delay_steps', str(args.noise_delay_steps),
+            ]
+
         if args.log_wandb:
             command.append('--log_wandb')
         if not args.log_csv:
@@ -91,8 +105,8 @@ def main():
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 1:  # if no arguments are provided, use the following defaults
-        sys.argv += '--num_procs 2 --device cuda --name asd --seed 1 --log_csv true --save true'.split(' ')
+    if len(sys.argv) == 1:  # defaults
+        sys.argv += '--num_procs 2 --device cuda --name belief_test --seed 1 --log_csv true --save true'.split(' ')
     try:
         main()
     except KeyboardInterrupt:
@@ -101,9 +115,14 @@ if __name__ == '__main__':
         # kill_all_wandb_processes()
         sys.exit(0)
 
-#         python run_zones.py \
-#   --name zones_paper_s1 \
+# 示例：
+# python run_zones.py \
+#   --name ppo_belief_eta002 \
 #   --seed 1 \
-#   --device cuda:0 \
+#   --device cuda \
 #   --num_procs 16 \
-#   --log_csv true --save true
+#   --log_csv true --save true \
+#   --shaping_enable true --shaping_beta 0.01 --shaping_eta 0.02 --shaping_alpha 0.5 \
+#   --belief_enable true --belief_ema_tau 0.9 --belief_temperature 1.0 \
+#   --belief_reward_coef_delta 0.02 --belief_expose_accept_prob true \
+#   --noise_enable true --noise_p_miss 0.05 --noise_p_false 0.02 --noise_delay_steps 1

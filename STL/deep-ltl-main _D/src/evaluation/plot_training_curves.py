@@ -12,6 +12,16 @@ from typing import List, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import matplotlib as mpl
+def _safe_backend():
+    try:
+        import tkinter as tk
+        r=tk.Tk(); scale=float(r.tk.call("tk","scaling")); r.destroy()
+        if scale < 0.5:         # ToDesk/虚拟显示常见异常
+            mpl.use("Agg"); mpl.rcParams["toolbar"]="None"
+    except Exception:
+        mpl.use("Agg"); mpl.rcParams["toolbar"]="None"
+_safe_backend()
 from matplotlib import pyplot as plt
 
 sns.set_theme(font_scale=2.2)
@@ -19,7 +29,7 @@ sns.set_theme(font_scale=2.2)
 # ====================== 配置 ======================
 ENV = "PointLtl2-v0"      # "LetterEnv-v0" / "FlatWorld-v0"
 # EXPERIMENTS = ["zones_paper_s1", "zones_paper_s1_shapping","ppo_shaping_alpha05","ppo_shaping_her"]  # 注意拼写
-EXPERIMENTS = ["zones_paper_s1", "ppo_shaping_her"] 
+EXPERIMENTS = ["zones_paper_s1", "base_hard_noshaping"] 
 NAME_MAPPING = {
     "zones_paper_s1": "Zones S1",
     "zones_paper_s1_shapping": "Zones S1 + Shaping",
@@ -42,7 +52,7 @@ SEARCH_ROOTS = ["experiments/ppo", "experiments/sac", "eval_results"]
 # 改成 METRIC="violation_rate"：画 违规率 曲线。
 
 # 改成 METRIC="avg_steps"：画 每回合步数 曲线。
-METRIC = "avg_steps"  # 可选 "return", "success_rate", "violation_rate", "avg_steps"
+METRIC = "violation_rate"  # 可选 "return", "success_rate", "violation_rate", "avg_steps"
 
 # 平滑窗口半径（>=2 生效）
 SMOOTH_RADIUS = 9
@@ -50,7 +60,7 @@ SMOOTH_RADIUS = 9
 # 误差带：True=CI 90%，False=标准差
 USE_CI = True
 
-OUT_PATH = Path("/home/gh/公共/zh/image/alpha5_her/temp.pdf")
+OUT_PATH = Path("/home/gh/公共/zh/image/temp.pdf")
 # ==================================================
 
 

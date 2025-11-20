@@ -16,8 +16,12 @@ import torch_ac
 import utils
 from model.model import build_model
 from envs import make_env, get_env_attr
-# 训练期奖励形塑
-from envs.potential_shaping_wrapper import PotentialShapingWrapper  # <-- 保留
+# 训练期奖励形塑（保留）
+from envs.potential_shaping_wrapper import PotentialShapingWrapper
+# Phase-1：信念推进（已实现于 src/envs/belief_wrapper.py）
+from envs.belief_wrapper import BeliefReachAvoidWrapper
+# 命题噪声注入（漏检/误报/延迟）
+from envs.proposition_noise_wrapper import PropositionNoiseWrapper
 
 from sequence.samplers import CurriculumSampler, curricula
 from utils import torch_utils
@@ -27,9 +31,6 @@ from utils.logging.text_logger import TextLogger
 from utils.logging.wandb_logger import WandbLogger
 from utils.model_store import ModelStore
 from config import *
-# （你之前加的） from train.reward_shaping import shape_episode_rewards  # <-- 本方案不再需要，可移除
-
-# —— HER 相关：已全部删除 ——
 
 
 class Trainer:
@@ -66,12 +67,12 @@ class Trainer:
 
         self.text_logger.info(f'Num parameters: {torch_utils.get_number_of_params(model)}')
 
-        num_steps = training_status["num_steps"]           # 总环境步数
-        num_updates = training_status["num_updates"]       # 参数更新次数
-        num_eval_steps = training_status["num_eval_steps"] # 评估间隔内的环境步数
+        num_steps = training_status["num_steps"]
+        num_updates = training_status["num_updates"]
+        num_eval_steps = training_status["num_eval_steps"]
 
         while num_steps < self.args.experiment.num_steps:
-            # 指定每隔多少个环境步进行一次评估保存
+            # 评估与快照
             if self.args.save and (num_updates == 0 or num_eval_steps >= self.args.experiment.eval_interval):
                 num_eval_steps = 0
                 training_status = {"num_steps": num_steps, "num_updates": num_updates,
@@ -80,30 +81,33 @@ class Trainer:
                 print("112")
 
             start = time.time()
-            # 每次 rollout 采样
+            # 采样
             exps, logs = algo.collect_experiences()
 
-            # ---- 形塑诊断统计（若 wrapper 提供该接口）----
+            # ---- 形塑诊断（若 wrapper 提供可选接口）----
             try:
                 if hasattr(envs[0], "get_shaping_stats_and_reset"):
                     stats = [e.get_shaping_stats_and_reset() for e in envs]
-                    # 平均到每个并行环境，写入日志
                     logs["shape_sum"]  = float(sum(s["step_shaping_sum"] for s in stats)) / max(1, len(stats))
                     logs["shape_prog"] = float(sum(s["progress_hits"]    for s in stats)) / max(1, len(stats))
             except Exception:
-                # 静默失败即可；不影响训练
                 pass
+            # （可选）信念统计：若后续在 BeliefReachAvoidWrapper 中实现类似接口，可在此添加
+            # try:
+            #     if hasattr(envs[0], "get_belief_stats_and_reset"):
+            #         bstats = [e.get_belief_stats_and_reset() for e in envs]
+            #         logs["accept_prob_mean"] = float(sum(s["accept_prob_mean"] for s in bstats)) / max(1, len(bstats))
+            #         logs["belief_entropy_mean"] = float(sum(s["belief_entropy_mean"] for s in bstats)) / max(1, len(bstats))
+            # except Exception:
+            #     pass
             # --------------------------------------------
 
             curriculum = get_env_attr(envs[0], 'sample_sequence').curriculum
             curriculum.update_task_success(logs['avg_goal_success'], verbose=True)
 
-            # 不改 PPO 算法与优势/回报：奖励形塑已在 env wrapper 内完成
+            # 更新
             update_logs = algo.update_parameters(exps)
             logs.update(update_logs)
-
-            # —— HER 训练：已移除 ——
-
 
             update_time = time.time() - start
 
@@ -138,7 +142,6 @@ class Trainer:
                 break
 
         if self.args.save:
-            # 取 curriculum 当前阶段，避免未定义
             try:
                 curr_stage = curriculum.stage_index
             except UnboundLocalError:
@@ -166,9 +169,23 @@ class Trainer:
             self.text_logger.important_info(f"Curriculum stage: {curriculum.stage_index}")
             sampler = CurriculumSampler.partial(curriculum)
 
+            # 基础环境（含 LDBA/序列）：
             base_env = make_env(self.args.experiment.env, sampler, sequence=True)
 
-            # 奖励形塑 wrapper（若启用）
+            # 每个并行 env 的独立随机源（用于噪声 wrapper）
+            env_seed = 100 * self.args.experiment.seed + i
+
+            # 1) 命题噪声（尽量靠内层，模拟“传感层”）
+            if getattr(self.args, "noise_enable", False):
+                base_env = PropositionNoiseWrapper(
+                    base_env,
+                    p_miss=getattr(self.args, "noise_p_miss", 0.0),
+                    p_false=getattr(self.args, "noise_p_false", 0.0),
+                    delay_steps=getattr(self.args, "noise_delay_steps", 0),
+                    seed=env_seed,
+                )
+
+            # 2) 势能塑形（保留）
             if getattr(self.args, "shaping_enable", False):
                 base_env = PotentialShapingWrapper(
                     base_env,
@@ -178,11 +195,19 @@ class Trainer:
                     alpha=getattr(self.args, "shaping_alpha", 0.0),
                 )
 
-            # —— HER 记录器 EpisodeBufferWrapper：已移除 ——
+            # 3) Phase-1：信念推进（与塑形并行，可独立开关）
+            if getattr(self.args, "belief_enable", False):
+                base_env = BeliefReachAvoidWrapper(
+                    base_env,
+                    ema_tau=getattr(self.args, "belief_ema_tau", 0.9),
+                    temperature=getattr(self.args, "belief_temperature", 1.0),
+                    reward_coef_delta=getattr(self.args, "belief_reward_coef_delta", 0.0),
+                    expose_accept_prob_in_obs=getattr(self.args, "belief_expose_accept_prob", False),
+                )
 
             envs.append(base_env)
 
-        # 独立设置每个并行环境的种子，避免重叠
+        # 独立设置每个并行环境的种子（环境本身）
         seed_offset = 100 * self.args.experiment.seed
         seeds = [seed_offset + i for i in range(self.args.experiment.num_procs)]
         self.text_logger.info(f"Using seeds: {seeds}")
@@ -226,7 +251,7 @@ class Trainer:
             "adr": average_discounted_return,
             'sps': sps,
             'remaining': remaining_time,
-            'num_steps': num_steps  # set num_steps to the total number of steps
+            'num_steps': num_steps
         })
         return logs
 
@@ -256,9 +281,37 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--shaping.alpha", dest="shaping_alpha",
                         type=float, default=0.5,
                         help="weight for next-subgoal matching distance in Phi(s)")
-    # --- END shaping ---
 
-    # —— HER 相关参数：已全部删除 ——
+    # --- belief args (Phase-1) ---
+    parser.add_argument("--belief.enable", dest="belief_enable",
+                        action="store_true", default=False,
+                        help="Enable proposition belief & expected pulse shaping")
+    parser.add_argument("--belief.ema_tau", dest="belief_ema_tau",
+                        type=float, default=0.9,
+                        help="EMA smoothing for proposition probabilities (0~1)")
+    parser.add_argument("--belief.temperature", dest="belief_temperature",
+                        type=float, default=1.0,
+                        help="Temperature scaling for probability calibration (>0)")
+    parser.add_argument("--belief.reward_coef_delta", dest="belief_reward_coef_delta",
+                        type=float, default=0.0,
+                        help="Coefficient for expected event-pulse via accept_prob delta")
+    parser.add_argument("--belief.expose_accept_prob", dest="belief_expose_accept_prob",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="If true, append accept_prob into observation dict")
+
+    # --- proposition noise args ---
+    parser.add_argument("--noise_enable", dest="noise_enable",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Enable proposition noise injection (miss/false/delay)")
+    parser.add_argument("--noise_p_miss", dest="noise_p_miss",
+                        type=float, default=0.0,
+                        help="Probability of miss detection (true->false)")
+    parser.add_argument("--noise_p_false", dest="noise_p_false",
+                        type=float, default=0.0,
+                        help="Probability of false alarm (false->true)")
+    parser.add_argument("--noise_delay_steps", dest="noise_delay_steps",
+                        type=int, default=0,
+                        help="FIFO delay (in steps) for propositions")
 
     args = parser.parse_args()
 
@@ -280,9 +333,12 @@ def main():
     print(f"Training took {training_time}.")
 
 
-# 运行示例：
-# python run_zones.py --device cuda --name ppo_shaping_beta001_eta002 --seed 1 \
-#   --shaping.enable --shaping.beta 0.01 --shaping.eta 0.02 --shaping.alpha 0.5 \
+# 运行示例（含噪声与信念推进）：
+# python run_zones.py --device cuda --name ppo_belief_eta002 --seed 1 \
+#   --shaping_enable true --shaping_beta 0.01 --shaping_eta 0.02 --shaping_alpha 0.5 \
+#   --belief_enable true --belief_ema_tau 0.9 --belief_temperature 1.0 \
+#   --belief_reward_coef_delta 0.02 --belief_expose_accept_prob true \
+#   --noise_enable true --noise_p_miss 0.05 --noise_p_false 0.02 --noise_delay_steps 1 \
 #   --model_config PointLtl2-v0 --curriculum PointLtl2-v0
 if __name__ == '__main__':
     main()
