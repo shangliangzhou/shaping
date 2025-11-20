@@ -1,0 +1,5 @@
+method,auc_norm_mean,auc_norm_std,steps_to_0.9_mean,steps_to_0.9_std,reached_ratio
+PPO Shaping + HER,0.0,0.0,15007744.0,0.0,0.0
+PPO Shaping + alpha=0.5,0.0,0.0,15007744.0,0.0,0.0
+Zones S1,0.0,0.0,15007744.0,0.0,0.0
+Zones S1 + Shaping,0.0,0.0,15007744.0,0.0,0.0
